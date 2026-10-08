@@ -1,0 +1,63 @@
+# Kiro Crew Gateway on Fly.io: one always-on Machine, one volume, no public
+# exposure. `fly launch --copy-config` adds `app` and `primary_region` (and
+# reformats this file, dropping the comments).
+
+# Fly's default stop signal is SIGINT with a 5s timeout. The image expects
+# SIGTERM for a graceful shutdown.
+kill_signal = "SIGTERM"
+kill_timeout = "30s"
+
+# 4 GB of swap, matching what `kirocrew cloud launch` configures on EC2.
+swap_size_mb = 4096
+
+[build]
+  dockerfile = "Dockerfile"
+
+# There is deliberately NO [http_service] or [[services]] section:
+#   - nothing is routed from the public internet, so the dashboard is reachable
+#     only over the org's private network (see README, "Open the dashboard");
+#   - with no Fly Proxy service there is no auto-stop / scale-to-zero, so the
+#     Machine stays up for crons, heartbeats and channel connections.
+
+[env]
+  # Port the 6PN relay listens on (fly/forward.py). The gateway itself keeps
+  # the image defaults: KIROCREW_BIND=0.0.0.0, port 5476.
+  CREWFLY_PRIVATE_PORT = "5477"
+  # On Fly the image's tini is not PID 1 (Fly's init is), so it must register
+  # as a subreaper to reap zombies from agent subprocess trees.
+  TINI_SUBREAPER = "1"
+
+# All Crew and kiro-cli state lives under the gateway user's home, not only
+# under ~/.kiro/crew, so the whole home is the volume (same as upstream's
+# `docker run -v kirocrew-home:/home/kirocrew`).
+[[mounts]]
+  source = "crew_home"
+  destination = "/home/kirocrew"
+  initial_size = "20gb"
+  auto_extend_size_threshold = 80
+  auto_extend_size_increment = "10gb"
+  auto_extend_size_limit = "100gb"
+  snapshot_retention = 14
+
+# Restart the gateway whenever it exits, cleanly or not.
+[[restart]]
+  policy = "always"
+
+# Replaces the image's Docker HEALTHCHECK, which Fly ignores. /api/health is
+# token-free and exempt from Crew's Host-header check.
+[checks.gateway]
+  type = "http"
+  port = 5476
+  method = "GET"
+  path = "/api/health"
+  interval = "30s"
+  timeout = "5s"
+  grace_period = "60s"
+
+# Agent sessions run on the gateway host today, so this is sized for sessions,
+# not for the control plane alone. 16 GB matches the smallest tier
+# `kirocrew cloud launch` offers ("Light": 4 vCPU / 16 GB); upstream says 8 GB
+# gets OOM-killed. See docs/design.md.
+[[vm]]
+  size = "shared-cpu-8x"
+  memory = "16gb"
